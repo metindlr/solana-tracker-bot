@@ -1,65 +1,61 @@
-import time
+import asyncio
+import json
 import requests
-from threading import Thread
-from flask import Flask
+import time
+from datetime import datetime
+from telegram import Bot
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "Bot 7/24 Aktif ve Calisiyor!"
-
-def run_web_server():
-    app.run(host='0.0.0.0', port=10000)
-
-# --- YAPILANDIRMA ---
+# Kullanıcı Bilgileri
 TELEGRAM_BOT_TOKEN = "8624055135:AAFgB9-9Rhis97bFs4IJkpVzNcmukcH5MAA"
 TELEGRAM_CHAT_ID = "916915195"
-HELIUS_API_KEY = "fb2cae6c-1349-427d-8c05-b644ad06259c"
-
-TARGET_WALLETS = [
-    "CLM6E4zpTviEC77nWKogpVLQoXx9tgoQCYJ8NibxKg1Q",
-    "EuWbAc5zTpRzTpxx89RhQGZnvPntyrTSQozkLs5QwyH1"
+WALLETS = [
+    "EuWbAc5zTpRzTpxx89RhQGZnvPntyrTSQozkLs5QwyH1",
+    "CLM6E4zpTviEC77nWKogpVLQoXx9tgoQCYJ8NibxKg1Q"
 ]
 
-RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
-PARSE_URL = f"https://api.helius.xyz/v0/transactions?api-key={HEHIUS_API_KEY}"
+# API Endpoint'leri (Solscan ve DexScreener)
+SOLSCAN_API_URL = "https://api.solscan.io" # Not: Pro API anahtarı gerekebilir, genel kullanım için sınırlı olabilir
+DEXSCREENER_API_URL = "https://api.dexscreener.com/latest/dex/tokens/"
+SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com"
 
-KNOWN_WALLET_TOKENS = {wallet: set() for wallet in TARGET_WALLETS}
-TOKEN_METADATA_CACHE = {}
+# Veri saklama (Önceki portföy durumlarını karşılaştırmak için)
+previous_portfolios = {}
 
-def send_telegram_message(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": True
-    }
-    try: requests.post(url, json=payload)
-    except Exception as e: print(f"Telegram hatası: {e}")
-
-def get_token_metadata_batch(mint_list):
-    needed_mints = [m for m in mint_list if m not in TOKEN_METADATA_CACHE]
-    if not needed_mints: return
+async def send_telegram_message(message):
     try:
-        TOKEN_METADATA_CACHE["So11111111111111111111111111111111111111112"] = "SOL"
-        for mint in needed_mints:
-            if mint == "So11111111111111111111111111111111111111112": continue
-            res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{mint}").json()
-            pairs = res.get("pairs", [])
-            if pairs:
-                base_token = pairs[0].get("baseToken", {})
-                symbol = base_token.get("symbol", f"{mint[:4]}..")
-                TOKEN_METADATA_CACHE[mint] = symbol.upper()
-            else:
-                TOKEN_METADATA_CACHE[mint] = f"{mint[:4]}.."
+        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='Markdown')
     except Exception as e:
-        print(f"Metadata hatası: {e}")
+        print(f"Telegram hatası: {e}")
 
-def get_solana_token_balances(wallet_address):
+def get_sol_balance(wallet_address):
     payload = {
-        "jsonrpc": "2.0", "id": 1,
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getBalance",
+        "params": [wallet_address]
+    }
+    try:
+        response = requests.post(SOLANA_RPC_URL, json=payload)
+        result = response.json()
+        balance_lamports = result.get('result', {}).get('value', 0)
+        return balance_lamports / 10**9
+    except Exception as e:
+        print(f"SOL bakiye çekme hatası: {e}")
+        return 0
+
+def get_token_accounts(wallet_address):
+    # Bu kısım normalde Solscan Pro veya Helius gibi bir API gerektirir. 
+    # Genel RPC üzerinden getProgramAccounts kullanılabilir ancak çok yavaştır.
+    # Bu botta gösterim amaçlı Solscan'in halka açık (varsa) veya alternatif bir veri kaynağı simüle edilmiştir.
+    # Gerçek uygulamada Helius veya Birdeye API anahtarı kullanılması önerilir.
+    
+    # Simülasyon/Basit Veri Çekme (Helius DAS API veya benzeri idealdir)
+    # Şimdilik Solana RPC üzerinden token hesaplarını çekmeyi deneyelim
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
         "method": "getTokenAccountsByOwner",
         "params": [
             wallet_address,
@@ -67,169 +63,133 @@ def get_solana_token_balances(wallet_address):
             {"encoding": "jsonParsed"}
         ]
     }
-    portfolio = []
     try:
-        # SOL Bakiyesi (SOL Balance)
-        sol_payload = {"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [wallet_address]}
-        sol_res = requests.post(RPC_URL, json=sol_payload).json()
-        sol_balance = sol_res.get("result", {}).get("value", 0) / 1000000000
-        
-        if sol_balance > 0:
-            portfolio.append({"mint": "So11111111111111111111111111111111111111112", "amount": sol_balance})
-
-        # Diğer Token Bakiyeleri (Token Balance)
-        response = requests.post(RPC_URL, json=payload)
-        accounts = response.json().get("result", {}).get("value", [])
-        
-        for acc in accounts:
-            info = acc.get("account", {}).get("data", {}).get("parsed", {}).get("info", {})
-            mint = info.get("mint")
-            amount = float(info.get("tokenAmount", {}).get("uiAmount", 0))
-            
-            if amount > 0 and mint:
-                portfolio.append({"mint": mint, "amount": amount})
-                KNOWN_WALLET_TOKENS[wallet_address].add(mint)
+        response = requests.post(SOLANA_RPC_URL, json=payload)
+        tokens = response.json().get('result', {}).get('value', [])
+        token_list = []
+        for token in tokens:
+            data = token['account']['data']['parsed']['info']
+            mint = data['mint']
+            amount = float(data['tokenAmount']['uiAmount'])
+            if amount > 0:
+                token_list.append({'mint': mint, 'amount': amount})
+        return token_list
     except Exception as e:
-        print(f"Bakiye tarama hatası: {e}")
-    return portfolio
+        print(f"Token listesi çekme hatası: {e}")
+        return []
 
-def get_token_prices_jup(mint_list):
-    if not mint_list: return {}
-    prices = {}
+def get_token_price_and_info(mint_address):
     try:
-        ids = ",".join(mint_list)
-        res = requests.get(f"https://api.jup.ag/price/v2?ids={ids}").json()
-        data = res.get("data", {})
-        for mint, info in data.items():
-            if info: prices[mint] = float(info.get("price", 0))
-    except Exception as e: print(f"Fiyat çekilemedi: {e}")
-    return prices
+        response = requests.get(f"{DEXSCREENER_API_URL}{mint_address}")
+        data = response.json()
+        pairs = data.get('pairs', [])
+        if pairs:
+            # En yüksek likiditeye sahip çifti al
+            best_pair = pairs[0]
+            return {
+                'symbol': best_pair.get('baseToken', {}).get('symbol', 'UNKNOWN'),
+                'price': float(best_pair.get('priceUsd', 0)),
+                'name': best_pair.get('baseToken', {}).get('name', 'Unknown')
+            }
+    except:
+        pass
+    return {'symbol': '?', 'price': 0, 'name': 'Unknown'}
 
-def check_transaction_details(signature, wallet):
+async def check_wallets():
+    global previous_portfolios
+    
+    for wallet in WALLETS:
+        print(f"Kontrol ediliyor: {wallet}")
+        sol_balance = get_sol_balance(wallet)
+        tokens = get_token_accounts(wallet)
+        print(f"Bulunan token sayısı: {len(tokens)}")
+        
+        portfolio = []
+        total_value = sol_balance * get_token_price_and_info("So11111111111111111111111111111111111111112")['price']
+        
+        # Hız için: Sadece belirli bir miktarın üzerindeki tokenları işle veya ilk 20'ye odaklan
+        # Gerçek bir API (Helius/Birdeye) tüm fiyatları tek seferde verebilir.
+        # Ücretsiz RPC ve Dexscreener ile sınırlı sayıda tokenı kontrol etmek daha mantıklı.
+        
+        # Filtreleme: Çok küçük miktarları ele
+        filtered_tokens = [t for t in tokens if t['amount'] > 0]
+        
+        for t in filtered_tokens[:50]: # İlk 50 token ile sınırla (hız için)
+            info = get_token_price_and_info(t['mint'])
+            if info['price'] == 0: continue # Fiyat bulunamadıysa geç
+            value = t['amount'] * info['price']
+            total_value += value
+            portfolio.append({
+                'mint': t['mint'],
+                'symbol': info['symbol'],
+                'amount': t['amount'],
+                'value': value,
+                'price': info['price']
+            })
+        
+        # Değere göre sırala ve ilk 10'u al
+        portfolio.sort(key=lambda x: x['value'], reverse=True)
+        top_10 = portfolio[:10]
+        
+        # Rapor Hazırla
+        report = f"📊 *Cüzdan Özeti: {wallet[:6]}...{wallet[-4:]}*\n"
+        report += f"💰 *Toplam Değer:* ${total_value:,.2f}\n"
+        report += f"💎 *SOL Bakiyesi:* {sol_balance:.2f} SOL\n\n"
+        report += "*İlk 10 Token (Yatırım Değerine Göre):*\n"
+        
+        for i, item in enumerate(top_10, 1):
+            report += f"{i}. {item['symbol']}: {item['amount']:.2f} (${item['value']:,.2f})\n"
+        
+        # Yarım saatlik rutin rapor (Sadece loglara yazalım veya isteğe bağlı gönderelim)
+        print(report)
+        
+        # Değişiklik Kontrolü ve Anlık Bildirim
+        if wallet in previous_portfolios:
+            prev_data = previous_portfolios[wallet]
+            prev_mints = {p['mint'] for p in prev_data['portfolio']}
+            current_mints = {p['mint'] for p in portfolio}
+            
+            # 1. Yeni Token Alımı
+            new_tokens = current_mints - prev_mints
+            for mint in new_tokens:
+                token_info = next(p for p in portfolio if p['mint'] == mint)
+                if token_info['value'] > 10: # Çok küçük bakiyeleri (dust) görmezden gel
+                    msg = f"🚀 *YENİ TOKEN ALINDI!*\nCüzdan: `{wallet}`\nToken: {token_info['symbol']}\nMiktar: {token_info['amount']}\nDeğer: ${token_info['value']:,.2f}"
+                    await send_telegram_message(msg)
+            
+            # 2. 1000$ Üstü Alım/Satım (Miktar değişimi üzerinden değer kontrolü)
+            for curr in portfolio:
+                prev = next((p for p in prev_data['portfolio'] if p['mint'] == curr['mint']), None)
+                if prev:
+                    diff_amount = curr['amount'] - prev['amount']
+                    diff_value = abs(diff_amount * curr['price'])
+                    if diff_value > 1000:
+                        action = "ALIM" if diff_amount > 0 else "SATIM"
+                        msg = f"🔔 *BÜYÜK İŞLEM TESPİT EDİLDİ ({action})*\nCüzdan: `{wallet}`\nToken: {curr['symbol']}\nDeğişim Değeri: ${diff_value:,.2f}"
+                        await send_telegram_message(msg)
+        
+        # Durumu güncelle
+        previous_portfolios[wallet] = {
+            'total_value': total_value,
+            'sol_balance': sol_balance,
+            'portfolio': portfolio
+        }
+
+async def main():
+    # İlk çalıştırmada mevcut durumu kaydet
+    await check_wallets()
+    
+    # Zamanlayıcıyı başlat (30 dakikada bir)
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(check_wallets, 'interval', minutes=30)
+    scheduler.start()
+    
+    print("Bot çalışıyor... Çıkmak için Ctrl+C")
     try:
-        payload = {"transactions": [signature]}
-        tx_data = requests.post(PARSE_URL, json=payload).json()
-        if not tx_data: return
-
-        tx = tx_data[0]
-        if tx.get("type") != "SWAP": return
-
-        token_transfers = tx.get("tokenTransfers", [])
-        incoming_mint, incoming_amount, outgoing_mint, outgoing_amount = None, 0, None, 0
-
-        for tf in token_transfers:
-            if tf.get("toUser") == wallet:
-                incoming_mint = tf.get("mint", "")
-                incoming_amount = tf.get("tokenAmount", 0)
-            if tf.get("fromUser") == wallet:
-                outgoing_mint = tf.get("mint", "")
-                outgoing_amount = tf.get("tokenAmount", 0)
-
-        if not incoming_mint and not outgoing_mint: return
-
-        mints = [m for m in [incoming_mint, outgoing_mint] if m]
-        get_token_metadata_batch(mints)
-        prices = get_token_prices_jup(mints)
-        
-        in_price = prices.get(incoming_mint, 0)
-        out_price = prices.get(outgoing_mint, 0)
-        tx_usd_value = max(incoming_amount * in_price, outgoing_amount * out_price)
-
-        if tx_usd_value >= 1000:
-            is_new = incoming_mint not in KNOWN_WALLET_TOKENS[wallet] and incoming_mint != "So11111111111111111111111111111111111111112"
-            etiket = "🚨 YENİ COIN ALIMI!" if is_new else "🟢 ALIM (SWAP BUY)"
-            if outgoing_mint and not incoming_mint: etiket = "🔴 SATIM (SWAP SELL)"
-
-            in_name = TOKEN_METADATA_CACHE.get(incoming_mint, "Bilinmeyen") if incoming_mint else "Bilinmeyen"
-            out_name = TOKEN_METADATA_CACHE.get(outgoing_mint, "Bilinmeyen") if outgoing_mint else "Bilinmeyen"
-
-            msg = (
-                f"{etiket}\n\n"
-                f"👤 *Cüzdan:* `{wallet[:6]}...{wallet[-6:]}`\n"
-                f"💵 *Yatırım / Hacim:* `${tx_usd_value:,.2f}`\n"
-                f"📥 *Alınan:* {incoming_amount:,.2f} *{in_name}*\n"
-                f"📤 *Satılan:* {outgoing_amount:,.2f} *{out_name}*\n\n"
-                f"🔗 [Solscan Detay](https://solscan.io/tx/{signature})"
-            )
-            send_telegram_message(msg)
-            if incoming_mint: KNOWN_WALLET_TOKENS[wallet].add(incoming_mint)
-    except Exception as e: print(f"İşlem hatası: {e}")
-
-def send_periodic_report():
-    report_msg = "📊 *DOLAR DEĞERİNE GÖRE EN YÜKSEK İLK 10 COIN (30 DK)*\n───────────────────\n"
-    for wallet in TARGET_WALLETS:
-        portfolio = get_solana_token_balances(wallet)
-        mint_list = [t["mint"] for t in portfolio]
-        
-        get_token_metadata_batch(mint_list)
-        prices = get_token_prices_jup(mint_list)
-        
-        total_wallet_usd = 0.0
-        valued_portfolio = []
-        
-        for t in portfolio:
-            price = prices.get(t["mint"], 0)
-            usd_val = t["amount"] * price
-            total_wallet_usd += usd_val
-            
-            coin_symbol = TOKEN_METADATA_CACHE.get(t["mint"], f"{t['mint'][:4]}..")
-            
-            # Değeri 0.5 dolardan büyük olan gerçek varlıkları listeye ekle (Scam airdrop eliyici filtre)
-            if usd_val > 0.5 or t["mint"] == "So11111111111111111111111111111111111111112":
-                valued_portfolio.append({
-                    "symbol": coin_symbol, 
-                    "amount": t["amount"], 
-                    "usd_value": usd_val
-                })
-            
-        # 🔥 DEĞİŞİKLİK: Listenin en tepesine en çok dolar yatırılan coinleri (usd_value) yerleştiriyoruz
-        valued_portfolio.sort(key=lambda x: x["usd_value"], reverse=True)
-        top_10 = valued_portfolio[:10]
-
-        report_msg += f"👤 *Cüzdan:* `{wallet[:6]}...{wallet[-6:]}`\n"
-        report_msg += f"💰 *Total Value (Toplam Portföy):* `${total_wallet_usd:,.2f}`\n"
-        report_msg += f"📦 *Yatırım Büyüklüğüne Göre İlk 10:*\n"
-        
-        if top_10:
-            for t in top_10:
-                report_msg += f" • *{t['symbol']}:* {t['amount']:,.2f} adet (~`${t['usd_value']:,.2f}`)\n"
-        else:
-            report_msg += "  _(Kayda değer varlık bulunamadı)_\n"
-        report_msg += "───────────────────\n"
-    send_telegram_message(report_msg)
-
-def bot_loop():
-    for wallet in TARGET_WALLETS: get_solana_token_balances(wallet)
-    known_signatures = {w: set(get_latest_signatures(w)) for w in TARGET_WALLETS}
-    while True:
-        for wallet in TARGET_WALLETS:
-            try:
-                current_signatures = get_latest_signatures(wallet)
-                for sig in current_signatures:
-                    if sig not in known_signatures[wallet]:
-                        check_transaction_details(sig, wallet)
-                        known_signatures[wallet].add(sig)
-                if len(known_signatures[wallet]) > 30:
-                    known_signatures[wallet] = set(list(known_signatures[wallet])[-20:])
-            except Exception as e: pass
-        time.sleep(15)
-
-def get_latest_signatures(wallet_address):
-    payload = {"jsonrpc": "2.0", "id": 1, "method": "getSignaturesForAddress", "params": [wallet_address, {"limit": 3}]}
-    try:
-        res = requests.post(RPC_URL, json=payload).json()
-        return [tx["signature"] for tx in res.get("result", []) if "signature" in tx]
-    except: return []
-
-def portfolio_timer_loop():
-    time.sleep(10)
-    send_periodic_report()
-    while True:
-        time.sleep(1800)
-        try: send_periodic_report()
-        except Exception as e: print(f"Rapor hatası: {e}")
+        while True:
+            await asyncio.sleep(1)
+    except (KeyboardInterrupt, SystemExit):
+        pass
 
 if __name__ == "__main__":
-    Thread(target=run_web_server).start()
-    Thread(target=portfolio_timer_loop).start()
-    bot_loop()
+    asyncio.run(main())

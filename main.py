@@ -3,7 +3,6 @@ import requests
 from threading import Thread
 from flask import Flask
 
-# --- RENDER KAPANMASIN DİYE WEB SUNUCUSU ---
 app = Flask('')
 
 @app.route('/')
@@ -11,16 +10,16 @@ def home():
     return "Bot 7/24 Aktif ve Calisiyor!"
 
 def run_web_server():
-    # Render varsayılan olarak 10000 portunu dinler
     app.run(host='0.0.0.0', port=10000)
 
 # --- YAPILANDIRMA ---
 TELEGRAM_BOT_TOKEN = "8624055135:AAFgB9-9Rhis97bFs4IJkpVzNcmukcH5MAA"
 TELEGRAM_CHAT_ID = "916915195"
-HELIUS_API_KEY = "fb2cae6c-1349-427d-8c05-b644ad06259c"  # Hata aldığın çalışan keyin
+HELIUS_API_KEY = "fb2cae6c-1349-427d-8c05-b644ad06259c" 
 
 TARGET_WALLETS = [
     "CLM6E4zpTviEC77nWKogpVLQoXx9tgoQCYJ8NibxKg1Q",
+    "7iVCXQn4u6tiTEfNVqbWSEsRdEi69E9oYsSMiepuECwi",
     "EuWbAc5zTpRzTpxx89RhQGZnvPntyrTSQozkLs5QwyH1"
 ]
 
@@ -65,30 +64,79 @@ def check_transaction_details(signature, wallet):
             return
 
         tx = tx_data[0]
+        token_transfers = tx.get("tokenTransfers", [])
         
-        # Sadece Swap (Alım-Satım) işlemlerini yakala
-        if tx.get("type") == "SWAP":
-            description = tx.get("description", "")
-            solscan_url = f"https://solscan.io/tx/{signature}"
+        # Eğer token transferi yoksa ama SOL transferi varsa (Native SOL swapleri için)
+        native_transfers = tx.get("nativeTransfers", [])
+
+        incoming_tokens = []
+        outgoing_tokens = []
+
+        # Token transferlerini ayrıştır (SPL Tokens)
+        for tf in token_transfers:
+            mint = tf.get("mint", "Bilinmeyen")
+            amount = tf.get("tokenAmount", 0)
+            from_user = tf.get("fromUser", "")
+            to_user = tf.get("toUser", "")
             
-            # NOT: $1000 ve üzeri işlemleri Helius açıklamalarındaki SOL veya büyük miktarlardan filtreleriz.
-            # Ücretsiz sürümde tüm swapleri görmek istersen direkt gönderir.
-            msg = (
-                f"💰 *YENİ SWAP (ALIM/SATIM) TESPİT EDİLDİ*\n\n"
-                f"👤 *Cüzdan:* `{wallet}`\n"
-                f"📝 *Detay:* {description if description else 'Detaylar linkte.'}\n\n"
-                f"🔗 *Solscan:* [İşlemi İncele]({solscan_url})"
-            )
+            if from_user == wallet:
+                outgoing_tokens.append(f"{amount} adet (`{mint[:6]}...{mint[-6:]}`)")
+            if to_user == wallet:
+                incoming_tokens.append(f"{amount} adet (`{mint[:6]}...{mint[-6:]}`)")
+
+        # SOL transferlerini ayrıştır
+        for nf in native_transfers:
+            amount_sol = nf.get("amount", 0) / 1000000000 # Lamports to SOL
+            from_user = nf.get("fromUser", "")
+            to_user = nf.get("toUser", "")
+            
+            if amount_sol > 0.001: # Çok küçük fee/rent ücretlerini yoksay
+                if from_user == wallet:
+                    outgoing_tokens.append(f"{amount_sol} SOL")
+                if to_user == wallet:
+                    incoming_tokens.append(f"{amount_sol} SOL")
+
+        # İşlem türünü belirle
+        islem_tipi = "🔴 TRANSFER / ETKİLEŞİM"
+        if outgoing_tokens and incoming_tokens:
+            # Eğer cüzdandan SOL veya stablecoin (USDC/USDT) çıkıp başka bir şey girdiyse ALIMDIR
+            # Tam tersi durumda SATIMDIR. Basit bir mantık oturtalım:
+            is_sol_or_usdc_out = any("SOL" in x or "EPjFWb" in x for x in outgoing_tokens) # EPjFWb = USDC Mint adresi başlangıcı
+            
+            if is_sol_or_usdc_out:
+                islem_tipi = "🟢 ALIM (SWAP BUY)"
+            else:
+                islem_tipi = "🔴 SATIM (SWAP SELL)"
+        elif incoming_tokens:
+            islem_tipi = "📥 GELEN TRANSFER (INCOMING)"
+        elif outgoing_tokens:
+            islem_tipi = "📤 GİDEN TRANSFER (OUTGOING)"
+
+        # Mesajı oluştur
+        solscan_url = f"https://solscan.io/tx/{signature}"
+        
+        # Eğer kayda değer bir hareket varsa bildir
+        if incoming_tokens or outgoing_tokens:
+            msg = f"🔔 *CÜZDAN HAREKETİ TESPİT EDİLDİ*\n\n"
+            msg += f"👤 *Cüzdan:* `{wallet}`\n"
+            msg += f"📊 *İşlem Türü:* {islem_tipi}\n\n"
+            
+            if outgoing_tokens:
+                msg += f"📉 *Harcanan / Satılan:* \n" + "\n".join([f"• {x}" for x in outgoing_tokens]) + "\n"
+            if incoming_tokens:
+                msg += f"📈 *Alınan / Gelen:* \n" + "\n".join([f"• {x}" for x in incoming_tokens]) + "\n"
+                
+            msg += f"\n🔗 *Solscan:* [Detayları Gör]({solscan_url})"
+            
             send_telegram_message(msg)
-            print(f"İşlem bildirildi: {signature}")
+            print(f"Detaylı işlem bildirildi: {signature}")
 
     except Exception as e:
         print(f"Detaylandırırken hata: {e}")
 
-# --- BOTUN ANA DÖNGÜSÜ ---
 def bot_loop():
     print("Bot döngüsü başlatıldı...")
-    send_telegram_message("🚀 *Render Bulut Botu Aktif Edildi!*\nCüzdanlar 7/24 izleniyor, kısıtlama kaldırıldı.")
+    send_telegram_message("🚀 *Gelişmiş Filtreli Takip Botu Aktif Edildi!*\nAlım, satım ve coin kontratları detaylandırılıyor.")
     
     known_signatures = {}
     for wallet in TARGET_WALLETS:
@@ -110,9 +158,6 @@ def bot_loop():
         time.sleep(15)
 
 if __name__ == "__main__":
-    # Web sunucusunu arka planda başlat (Render'ı açık tutmak için)
     server_thread = Thread(target=run_web_server)
     server_thread.start()
-    
-    # Ana takip botunu başlat
     bot_loop()

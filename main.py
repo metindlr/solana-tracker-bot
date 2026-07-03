@@ -22,8 +22,11 @@ TARGET_WALLETS = [
     "EuWbAc5zTpRzTpxx89RhQGZnvPntyrTSQozkLs5QwyH1"
 ]
 
-RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
-PARSE_URL = f"https://api.helius.xyz/v0/transactions?api-key={HELIUS_API_KEY}"
+# Helius Gelişmiş Balans (Bakiye) API URL'si
+BALANCES_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
+
+# Botun ilk başladığı andaki cüzdan değerlerini tutmak için (PnL hesaplama amaçlı)
+INITIAL_WALLET_VALUES = {}
 
 def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -38,125 +41,118 @@ def send_telegram_message(message):
     except Exception as e:
         print(f"Telegram hatası: {e}")
 
-def get_latest_signatures(wallet_address):
+def get_wallet_portfolio(wallet_address):
+    """Helius API kullanarak cüzdandaki tüm tokenları ve tahmini USD değerlerini çeker."""
     payload = {
         "jsonrpc": "2.0",
-        "id": 1,
-        "method": "getSignaturesForAddress",
-        "params": [wallet_address, {"limit": 3}]
+        "id": "my-id",
+        "method": "getAssetsByOwner",
+        "params": {
+            "ownerAddress": wallet_address,
+            "page": 1,
+            "limit": 100,
+            "displayOptions": {
+                "showFungibleTokens": True  # SPL Tokenları (Coinleri) listele
+            }
+        }
     }
     try:
-        response = requests.post(RPC_URL, json=payload)
-        result = response.json().get("result", [])
-        return [tx["signature"] for tx in result if "signature" in tx]
-    except Exception as e:
-        print(f"İmzalar alınırken hata: {e}")
-        return []
-
-def check_transaction_details(signature, wallet):
-    try:
-        payload = {"transactions": [signature]}
-        response = requests.post(PARSE_URL, json=payload)
-        tx_data = response.json()
+        response = requests.post(BALANCES_URL, json=payload)
+        items = response.json().get("result", {}).get("items", [])
         
-        if not tx_data or len(tx_data) == 0:
-            return
-
-        tx = tx_data[0]
-        token_transfers = tx.get("tokenTransfers", [])
+        portfolio = []
+        total_usd_value = 0.0
         
-        # Eğer token transferi yoksa ama SOL transferi varsa (Native SOL swapleri için)
-        native_transfers = tx.get("nativeTransfers", [])
-
-        incoming_tokens = []
-        outgoing_tokens = []
-
-        # Token transferlerini ayrıştır (SPL Tokens)
-        for tf in token_transfers:
-            mint = tf.get("mint", "Bilinmeyen")
-            amount = tf.get("tokenAmount", 0)
-            from_user = tf.get("fromUser", "")
-            to_user = tf.get("toUser", "")
-            
-            if from_user == wallet:
-                outgoing_tokens.append(f"{amount} adet (`{mint[:6]}...{mint[-6:]}`)")
-            if to_user == wallet:
-                incoming_tokens.append(f"{amount} adet (`{mint[:6]}...{mint[-6:]}`)")
-
-        # SOL transferlerini ayrıştır
-        for nf in native_transfers:
-            amount_sol = nf.get("amount", 0) / 1000000000 # Lamports to SOL
-            from_user = nf.get("fromUser", "")
-            to_user = nf.get("toUser", "")
-            
-            if amount_sol > 0.001: # Çok küçük fee/rent ücretlerini yoksay
-                if from_user == wallet:
-                    outgoing_tokens.append(f"{amount_sol} SOL")
-                if to_user == wallet:
-                    incoming_tokens.append(f"{amount_sol} SOL")
-
-        # İşlem türünü belirle
-        islem_tipi = "🔴 TRANSFER / ETKİLEŞİM"
-        if outgoing_tokens and incoming_tokens:
-            # Eğer cüzdandan SOL veya stablecoin (USDC/USDT) çıkıp başka bir şey girdiyse ALIMDIR
-            # Tam tersi durumda SATIMDIR. Basit bir mantık oturtalım:
-            is_sol_or_usdc_out = any("SOL" in x or "EPjFWb" in x for x in outgoing_tokens) # EPjFWb = USDC Mint adresi başlangıcı
-            
-            if is_sol_or_usdc_out:
-                islem_tipi = "🟢 ALIM (SWAP BUY)"
-            else:
-                islem_tipi = "🔴 SATIM (SWAP SELL)"
-        elif incoming_tokens:
-            islem_tipi = "📥 GELEN TRANSFER (INCOMING)"
-        elif outgoing_tokens:
-            islem_tipi = "📤 GİDEN TRANSFER (OUTGOING)"
-
-        # Mesajı oluştur
-        solscan_url = f"https://solscan.io/tx/{signature}"
-        
-        # Eğer kayda değer bir hareket varsa bildir
-        if incoming_tokens or outgoing_tokens:
-            msg = f"🔔 *CÜZDAN HAREKETİ TESPİT EDİLDİ*\n\n"
-            msg += f"👤 *Cüzdan:* `{wallet}`\n"
-            msg += f"📊 *İşlem Türü:* {islem_tipi}\n\n"
-            
-            if outgoing_tokens:
-                msg += f"📉 *Harcanan / Satılan:* \n" + "\n".join([f"• {x}" for x in outgoing_tokens]) + "\n"
-            if incoming_tokens:
-                msg += f"📈 *Alınan / Gelen:* \n" + "\n".join([f"• {x}" for x in incoming_tokens]) + "\n"
+        for item in items:
+            # Sadece fungible (token/coin) olanları ve değeri olanları alalım
+            if item.get("interface") == "FungibleToken":
+                token_info = item.get("token_info", {})
+                balance = token_info.get("balance", 0)
+                decimals = token_info.get("decimals", 0)
                 
-            msg += f"\n🔗 *Solscan:* [Detayları Gör]({solscan_url})"
-            
-            send_telegram_message(msg)
-            print(f"Detaylı işlem bildirildi: {signature}")
-
+                # Gerçek miktar hesaplama
+                amount = balance / (10 ** decimals) if decimals > 0 else balance
+                
+                # Fiyat ve USD değerleri
+                price_info = token_info.get("price_info", {})
+                price_per_token = price_info.get("price_per_token", 0)
+                total_token_usd = amount * price_per_token
+                
+                # Metadata (Sembol ve İsim)
+                content = item.get("content", {})
+                metadata = content.get("metadata", {})
+                symbol = metadata.get("symbol", item.get("id", "Bilinmeyen")[:4]) # Sembol yoksa mint adresi kısaltması
+                
+                if total_token_usd > 1.0: # 1 dolardan değersiz çöp/scam tokenları listelemeyelim
+                    portfolio.append({
+                        "symbol": symbol,
+                        "amount": amount,
+                        "usd_value": total_token_usd
+                    })
+                    total_usd_value += total_token_usd
+                    
+        return portfolio, total_usd_value
     except Exception as e:
-        print(f"Detaylandırırken hata: {e}")
+        print(f"Portföy çekilirken hata ({wallet_address[:5]}): {e}")
+        return [], 0.0
 
-def bot_loop():
-    print("Bot döngüsü başlatıldı...")
-    send_telegram_message("🚀 *Gelişmiş Filtreli Takip Botu Aktif Edildi!*\nAlım, satım ve coin kontratları detaylandırılıyor.")
+def send_periodic_report():
+    """Her 30 dakikada bir tetiklenecek raporlama fonksiyonu."""
+    print("Yarım saatlik portföy raporu hazırlanıyor...")
     
-    known_signatures = {}
+    report_msg = "📊 *YARIM SAATLİK CÜZDAN PORTFÖY VE PnL RAPORU*\n"
+    report_msg += "───────────────────\n\n"
+    
     for wallet in TARGET_WALLETS:
-        known_signatures[wallet] = set(get_latest_signatures(wallet))
+        portfolio, total_value = get_wallet_portfolio(wallet)
+        
+        # İlk defa çalışıyorsa başlangıç değerini kaydet
+        if wallet not in INITIAL_WALLET_VALUES:
+            INITIAL_WALLET_VALUES[wallet] = total_value
+            
+        # PnL Hesaplama (Botun başladığı andan itibaren toplam değişim)
+        initial_value = INITIAL_WALLET_VALUES[wallet]
+        pnl_usd = total_value - initial_value
+        pnl_percent = (pnl_usd / initial_value * 100) if initial_value > 0 else 0.0
+        
+        pnl_sign = "🟩 +" if pnl_usd >= 0 else "🟥 "
+        
+        report_msg += f"👤 *Cüzdan:* `{wallet[:6]}...{wallet[-6:]}`\n"
+        report_msg += f"💰 *Toplam Portföy Değeri:* `${total_value:,.2f}`\n"
+        report_msg += f"📈 *Bot Başlangıcından Beri PnL:* {pnl_sign}${abs(pnl_usd):,.2f} (%{pnl_percent:.2f})\n"
+        report_msg += f"📦 *Varlıklar:*\n"
+        
+        if portfolio:
+            for token in portfolio:
+                report_msg += f" • *{token['symbol']}:* {token['amount']:,.2f} adet (~`${token['usd_value']:,.2f}`)\n"
+        else:
+            report_msg += "  _(1$ üzerinde değerli coin bulunamadı)_\n"
+            
+        report_msg += "───────────────────\n"
+        
+    send_telegram_message(report_msg)
+
+def portfolio_timer_loop():
+    """Her 30 dakikada bir (1800 saniye) rapor gönderen döngü."""
+    # Bot ilk açıldığında verileri kaydetmek için 10 saniye bekle, sonra ilk raporu at
+    time.sleep(10)
+    send_periodic_report()
     
     while True:
-        for wallet in TARGET_WALLETS:
-            try:
-                current_signatures = get_latest_signatures(wallet)
-                for sig in current_signatures:
-                    if sig not in known_signatures[wallet]:
-                        check_transaction_details(sig, wallet)
-                        known_signatures[wallet].add(sig)
-                
-                if len(known_signatures[wallet]) > 30:
-                    known_signatures[wallet] = set(list(known_signatures[wallet])[-20:])
-            except Exception as e:
-                print(f"Döngü hatası: {e}")
-        time.sleep(15)
+        time.sleep(1800) # 30 dakika = 1800 saniye
+        try:
+            send_periodic_report()
+        except Exception as e:
+            print(f"Rapor döngüsünde hata: {e}")
 
 if __name__ == "__main__":
+    # Web sunucusunu başlat (Render için)
     server_thread = Thread(target=run_web_server)
     server_thread.start()
-    bot_loop()
+    
+    # 30 dakikalık raporlama döngüsünü ayrı bir kanalda (thread) başlat
+    report_thread = Thread(target=portfolio_timer_loop)
+    report_thread.start()
+    
+    # NOT: Eğer istersen bir önceki mesajdaki anlık transferleri dinleyen `bot_loop()` fonksiyonunu da 
+    # buraya ekleyip ikisini aynı anda çalıştırabilirsin. Şu an sadece yarım saatlik raporlama ana odak yapıldı.

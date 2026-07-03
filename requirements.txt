@@ -1,2 +1,4 @@
 requests
-flask
+python-dotenv
+python-telegram-bot
+apscheduler

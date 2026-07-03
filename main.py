@@ -23,10 +23,10 @@ TARGET_WALLETS = [
 ]
 
 RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
-PARSE_URL = f"https://api.helius.xyz/v0/transactions?api-key={HELIUS_API_KEY}"
+PARSE_URL = f"https://api.helius.xyz/v0/transactions?api-key={HEHIUS_API_KEY}"
 
 KNOWN_WALLET_TOKENS = {wallet: set() for wallet in TARGET_WALLETS}
-TOKEN_METADATA_CACHE = {} # Coin isimlerini hafızada tutarak hızı artırır
+TOKEN_METADATA_CACHE = {}
 
 def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -40,29 +40,22 @@ def send_telegram_message(message):
     except Exception as e: print(f"Telegram hatası: {e}")
 
 def get_token_metadata_batch(mint_list):
-    """Jupiter API kullanarak kontrat adreslerinden gerçek coin isimlerini/sembollerini çeker."""
     needed_mints = [m for m in mint_list if m not in TOKEN_METADATA_CACHE]
     if not needed_mints: return
-    
     try:
-        # Belirli aralıklarla Jupiter'in geniş listesinden arama yapıyoruz
-        # Önbelleğe SOL ekle
         TOKEN_METADATA_CACHE["So11111111111111111111111111111111111111112"] = "SOL"
-        
-        # Token adlarını toplu çözmek için popüler katmanları tarar
         for mint in needed_mints:
             if mint == "So11111111111111111111111111111111111111112": continue
-            # Dexscreener API'sini isimleri en hızlı çözmek için yedek olarak kullanıyoruz
             res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{mint}").json()
             pairs = res.get("pairs", [])
             if pairs:
                 base_token = pairs[0].get("baseToken", {})
-                symbol = base_token.get("symbol", f"{mint[:4]}..{mint[-4:]}")
+                symbol = base_token.get("symbol", f"{mint[:4]}..")
                 TOKEN_METADATA_CACHE[mint] = symbol.upper()
             else:
-                TOKEN_METADATA_CACHE[mint] = f"{mint[:4]}..{mint[-4:]}"
+                TOKEN_METADATA_CACHE[mint] = f"{mint[:4]}.."
     except Exception as e:
-        print(f"Metadata çekilirken hata oluştu: {e}")
+        print(f"Metadata hatası: {e}")
 
 def get_solana_token_balances(wallet_address):
     payload = {
@@ -76,13 +69,15 @@ def get_solana_token_balances(wallet_address):
     }
     portfolio = []
     try:
+        # SOL Bakiyesi (SOL Balance)
         sol_payload = {"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [wallet_address]}
         sol_res = requests.post(RPC_URL, json=sol_payload).json()
         sol_balance = sol_res.get("result", {}).get("value", 0) / 1000000000
         
-        if sol_balance > 0.01:
+        if sol_balance > 0:
             portfolio.append({"mint": "So11111111111111111111111111111111111111112", "amount": sol_balance})
 
+        # Diğer Token Bakiyeleri (Token Balance)
         response = requests.post(RPC_URL, json=payload)
         accounts = response.json().get("result", {}).get("value", [])
         
@@ -133,7 +128,7 @@ def check_transaction_details(signature, wallet):
         if not incoming_mint and not outgoing_mint: return
 
         mints = [m for m in [incoming_mint, outgoing_mint] if m]
-        get_token_metadata_batch(mints) # İsimleri bul
+        get_token_metadata_batch(mints)
         prices = get_token_prices_jup(mints)
         
         in_price = prices.get(incoming_mint, 0)
@@ -161,12 +156,12 @@ def check_transaction_details(signature, wallet):
     except Exception as e: print(f"İşlem hatası: {e}")
 
 def send_periodic_report():
-    report_msg = "📊 *CÜZDAN PORTFÖY RAPORU (İLK 10 COIN)*\n───────────────────\n"
+    report_msg = "📊 *DOLAR DEĞERİNE GÖRE EN YÜKSEK İLK 10 COIN (30 DK)*\n───────────────────\n"
     for wallet in TARGET_WALLETS:
         portfolio = get_solana_token_balances(wallet)
         mint_list = [t["mint"] for t in portfolio]
         
-        get_token_metadata_batch(mint_list) # İsim havuzunu doldur
+        get_token_metadata_batch(mint_list)
         prices = get_token_prices_jup(mint_list)
         
         total_wallet_usd = 0.0
@@ -179,19 +174,27 @@ def send_periodic_report():
             
             coin_symbol = TOKEN_METADATA_CACHE.get(t["mint"], f"{t['mint'][:4]}..")
             
-            valued_portfolio.append({
-                "symbol": coin_symbol, "amount": t["amount"], "usd_value": usd_val
-            })
+            # Değeri 0.5 dolardan büyük olan gerçek varlıkları listeye ekle (Scam airdrop eliyici filtre)
+            if usd_val > 0.5 or t["mint"] == "So11111111111111111111111111111111111111112":
+                valued_portfolio.append({
+                    "symbol": coin_symbol, 
+                    "amount": t["amount"], 
+                    "usd_value": usd_val
+                })
             
+        # 🔥 DEĞİŞİKLİK: Listenin en tepesine en çok dolar yatırılan coinleri (usd_value) yerleştiriyoruz
         valued_portfolio.sort(key=lambda x: x["usd_value"], reverse=True)
         top_10 = valued_portfolio[:10]
 
-        report_msg += f"👤 *Cüzdan:* `{wallet[:6]}...{wallet[-6:]}`\n💰 *Toplam Portföy Yatırımı:* `${total_wallet_usd:,.2f}`\n📦 *Varlık Değerleri:*\n"
+        report_msg += f"👤 *Cüzdan:* `{wallet[:6]}...{wallet[-6:]}`\n"
+        report_msg += f"💰 *Total Value (Toplam Portföy):* `${total_wallet_usd:,.2f}`\n"
+        report_msg += f"📦 *Yatırım Büyüklüğüne Göre İlk 10:*\n"
+        
         if top_10:
             for t in top_10:
                 report_msg += f" • *{t['symbol']}:* {t['amount']:,.2f} adet (~`${t['usd_value']:,.2f}`)\n"
         else:
-            report_msg += "  _(Varlık bulunamadı)_\n"
+            report_msg += "  _(Kayda değer varlık bulunamadı)_\n"
         report_msg += "───────────────────\n"
     send_telegram_message(report_msg)
 
@@ -222,7 +225,7 @@ def portfolio_timer_loop():
     time.sleep(10)
     send_periodic_report()
     while True:
-        time.sleep(1800) # 30 Dakika bekler
+        time.sleep(1800)
         try: send_periodic_report()
         except Exception as e: print(f"Rapor hatası: {e}")
 

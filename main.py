@@ -21,7 +21,6 @@ HELIUS_API_KEY = "fb2cae6c-1349-427d-8c05-b644ad06259c"  # Hata aldığın çal�
 
 TARGET_WALLETS = [
     "CLM6E4zpTviEC77nWKogpVLQoXx9tgoQCYJ8NibxKg1Q",
-    "7iVCXQn4u6tiTEfNVqbWSEsRdEi69E9oYsSMiepuECwi",
     "EuWbAc5zTpRzTpxx89RhQGZnvPntyrTSQozkLs5QwyH1"
 ]
 

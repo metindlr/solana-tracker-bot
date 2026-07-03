@@ -1,12 +1,12 @@
 import asyncio
-import json
 import requests
-import time
+import json
 from datetime import datetime
 from telegram import Bot
+from telegram.constants import ParseMode
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# Kullanıcı Bilgileri
+# --- YAPILANDIRMA ---
 TELEGRAM_BOT_TOKEN = "8624055135:AAFgB9-9Rhis97bFs4IJkpVzNcmukcH5MAA"
 TELEGRAM_CHAT_ID = "916915195"
 WALLETS = [
@@ -14,20 +14,35 @@ WALLETS = [
     "CLM6E4zpTviEC77nWKogpVLQoXx9tgoQCYJ8NibxKg1Q"
 ]
 
-# API Endpoint'leri (Solscan ve DexScreener)
-SOLSCAN_API_URL = "https://api.solscan.io" # Not: Pro API anahtarı gerekebilir, genel kullanım için sınırlı olabilir
-DEXSCREENER_API_URL = "https://api.dexscreener.com/latest/dex/tokens/"
+# API Endpoint'leri
 SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com"
+DEXSCREENER_API_URL = "https://api.dexscreener.com/latest/dex/tokens/"
 
-# Veri saklama (Önceki portföy durumlarını karşılaştırmak için)
+# Veri saklama
 previous_portfolios = {}
 
 async def send_telegram_message(message):
     try:
         bot = Bot(token=TELEGRAM_BOT_TOKEN)
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='Markdown')
+        await bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID, 
+            text=message, 
+            parse_mode=ParseMode.MARKDOWN,
+            disable_web_page_preview=False
+        )
     except Exception as e:
         print(f"Telegram hatası: {e}")
+
+def get_sol_price():
+    try:
+        response = requests.get(f"{DEXSCREENER_API_URL}So11111111111111111111111111111111111111112")
+        data = response.json()
+        pairs = data.get('pairs', [])
+        if pairs:
+            return float(pairs[0].get('priceUsd', 0))
+    except:
+        pass
+    return 140.0 # Yedek fiyat
 
 def get_sol_balance(wallet_address):
     payload = {
@@ -46,13 +61,6 @@ def get_sol_balance(wallet_address):
         return 0
 
 def get_token_accounts(wallet_address):
-    # Bu kısım normalde Solscan Pro veya Helius gibi bir API gerektirir. 
-    # Genel RPC üzerinden getProgramAccounts kullanılabilir ancak çok yavaştır.
-    # Bu botta gösterim amaçlı Solscan'in halka açık (varsa) veya alternatif bir veri kaynağı simüle edilmiştir.
-    # Gerçek uygulamada Helius veya Birdeye API anahtarı kullanılması önerilir.
-    
-    # Simülasyon/Basit Veri Çekme (Helius DAS API veya benzeri idealdir)
-    # Şimdilik Solana RPC üzerinden token hesaplarını çekmeyi deneyelim
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -71,93 +79,118 @@ def get_token_accounts(wallet_address):
             data = token['account']['data']['parsed']['info']
             mint = data['mint']
             amount = float(data['tokenAmount']['uiAmount'])
+            decimals = int(data['tokenAmount']['decimals'])
             if amount > 0:
-                token_list.append({'mint': mint, 'amount': amount})
+                token_list.append({'mint': mint, 'amount': amount, 'decimals': decimals})
         return token_list
     except Exception as e:
         print(f"Token listesi çekme hatası: {e}")
         return []
 
-def get_token_price_and_info(mint_address):
-    try:
-        response = requests.get(f"{DEXSCREENER_API_URL}{mint_address}")
-        data = response.json()
-        pairs = data.get('pairs', [])
-        if pairs:
-            # En yüksek likiditeye sahip çifti al
-            best_pair = pairs[0]
-            return {
-                'symbol': best_pair.get('baseToken', {}).get('symbol', 'UNKNOWN'),
-                'price': float(best_pair.get('priceUsd', 0)),
-                'name': best_pair.get('baseToken', {}).get('name', 'Unknown')
-            }
-    except:
-        pass
-    return {'symbol': '?', 'price': 0, 'name': 'Unknown'}
+def get_token_details_batch(mints):
+    # DexScreener toplu aramayı desteklemez, ancak biz anlamlı bakiyesi olanları tek tek hızlıca çekeceğiz
+    results = {}
+    # Not: Gerçek bir uygulamada burada rate limit kontrolü yapılmalıdır.
+    for i, mint in enumerate(mints):
+        print(f"  [{i+1}/{len(mints)}] Fiyat çekiliyor: {mint}")
+        try:
+            response = requests.get(f"{DEXSCREENER_API_URL}{mint}", timeout=5)
+            data = response.json()
+            pairs = data.get('pairs', [])
+            if pairs:
+                # En yüksek likiditeye sahip çifti bul
+                best_pair = sorted(pairs, key=lambda x: x.get('liquidity', {}).get('usd', 0), reverse=True)[0]
+                results[mint] = {
+                    'name': best_pair.get('baseToken', {}).get('name', 'Bilinmiyor'),
+                    'symbol': best_pair.get('baseToken', {}).get('symbol', '???'),
+                    'price': float(best_pair.get('priceUsd', 0)),
+                    'url': best_pair.get('url', f"https://dexscreener.com/solana/{mint}")
+                }
+            else:
+                results[mint] = {'name': 'Bilinmiyor', 'symbol': '???', 'price': 0, 'url': f"https://dexscreener.com/solana/{mint}"}
+        except:
+            results[mint] = {'name': 'Bilinmiyor', 'symbol': '???', 'price': 0, 'url': f"https://dexscreener.com/solana/{mint}"}
+    return results
 
 async def check_wallets():
     global previous_portfolios
+    sol_price = get_sol_price()
     
     for wallet in WALLETS:
-        print(f"Kontrol ediliyor: {wallet}")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Kontrol ediliyor: {wallet}")
         sol_balance = get_sol_balance(wallet)
-        tokens = get_token_accounts(wallet)
-        print(f"Bulunan token sayısı: {len(tokens)}")
+        token_accounts = get_token_accounts(wallet)
+        
+        # Sadece anlamlı bakiyesi olanları işle (Hız için)
+        # Önce tüm mintleri alalım
+        mints = [t['mint'] for t in token_accounts]
+        
+        # Detayları çek (Bu kısım cüzdandaki token sayısına göre zaman alabilir)
+        # Optimizasyon: Sadece ilk 20-30 tokenı detaylandır
+        token_details = get_token_details_batch(mints[:30])
         
         portfolio = []
-        total_value = sol_balance * get_token_price_and_info("So11111111111111111111111111111111111111112")['price']
+        sol_value = sol_balance * sol_price
+        total_value = sol_value
         
-        # Hız için: Sadece belirli bir miktarın üzerindeki tokenları işle veya ilk 20'ye odaklan
-        # Gerçek bir API (Helius/Birdeye) tüm fiyatları tek seferde verebilir.
-        # Ücretsiz RPC ve Dexscreener ile sınırlı sayıda tokenı kontrol etmek daha mantıklı.
+        portfolio.append({
+            'mint': 'So11111111111111111111111111111111111111112',
+            'name': 'Solana',
+            'symbol': 'SOL',
+            'amount': sol_balance,
+            'price': sol_price,
+            'value': sol_value,
+            'url': 'https://dexscreener.com/solana/So11111111111111111111111111111111111111112'
+        })
+
+        for t in token_accounts:
+            mint = t['mint']
+            if mint in token_details:
+                details = token_details[mint]
+                value = t['amount'] * details['price']
+                if value > 0.01: # 1 cent altını listeye alma
+                    total_value += value
+                    portfolio.append({
+                        'mint': mint,
+                        'name': details['name'],
+                        'symbol': details['symbol'],
+                        'amount': t['amount'],
+                        'price': details['price'],
+                        'value': value,
+                        'url': details['url']
+                    })
         
-        # Filtreleme: Çok küçük miktarları ele
-        filtered_tokens = [t for t in tokens if t['amount'] > 0]
-        
-        for t in filtered_tokens[:50]: # İlk 50 token ile sınırla (hız için)
-            info = get_token_price_and_info(t['mint'])
-            if info['price'] == 0: continue # Fiyat bulunamadıysa geç
-            value = t['amount'] * info['price']
-            total_value += value
-            portfolio.append({
-                'mint': t['mint'],
-                'symbol': info['symbol'],
-                'amount': t['amount'],
-                'value': value,
-                'price': info['price']
-            })
-        
-        # Değere göre sırala ve ilk 10'u al
+        # Değere göre sırala
         portfolio.sort(key=lambda x: x['value'], reverse=True)
         top_10 = portfolio[:10]
         
         # Rapor Hazırla
-        report = f"📊 *Cüzdan Özeti: {wallet[:6]}...{wallet[-4:]}*\n"
-        report += f"💰 *Toplam Değer:* ${total_value:,.2f}\n"
-        report += f"💎 *SOL Bakiyesi:* {sol_balance:.2f} SOL\n\n"
+        report = f"📊 *Cüzdan Durumu:* `{wallet[:6]}...{wallet[-4:]}`\n"
+        report += f"💰 *Toplam Değer:* `${total_value:,.2f}`\n"
+        report += f"💎 *SOL:* `{sol_balance:.4f}` (~${sol_value:,.2f})\n\n"
         report += "*İlk 10 Token (Yatırım Değerine Göre):*\n"
         
         for i, item in enumerate(top_10, 1):
-            report += f"{i}. {item['symbol']}: {item['amount']:.2f} (${item['value']:,.2f})\n"
+            report += f"{i}. [{item['name']} ({item['symbol']})]({item['url']}): `{item['amount']:,.0f}` (~${item['value']:,.2f})\n"
         
-        # Yarım saatlik rutin rapor (Sadece loglara yazalım veya isteğe bağlı gönderelim)
-        print(report)
-        
-        # Değişiklik Kontrolü ve Anlık Bildirim
+        print(f"Cüzdan {wallet} için rapor hazırlandı. Toplam Değer: ${total_value:,.2f}")
+
+        # Bildirim Kontrolü
         if wallet in previous_portfolios:
             prev_data = previous_portfolios[wallet]
             prev_mints = {p['mint'] for p in prev_data['portfolio']}
-            current_mints = {p['mint'] for p in portfolio}
             
             # 1. Yeni Token Alımı
-            new_tokens = current_mints - prev_mints
-            for mint in new_tokens:
-                token_info = next(p for p in portfolio if p['mint'] == mint)
-                if token_info['value'] > 10: # Çok küçük bakiyeleri (dust) görmezden gel
-                    msg = f"🚀 *YENİ TOKEN ALINDI!*\nCüzdan: `{wallet}`\nToken: {token_info['symbol']}\nMiktar: {token_info['amount']}\nDeğer: ${token_info['value']:,.2f}"
+            for curr in portfolio:
+                if curr['mint'] not in prev_mints and curr['value'] > 50: # 50$ üstü yeni alımlar
+                    msg = f"🚀 *YENİ TOKEN ALINDI!*\n"
+                    msg += f"Cüzdan: `{wallet}`\n"
+                    msg += f"Token: [{curr['name']}]({curr['url']})\n"
+                    msg += f"Miktar: `{curr['amount']:,.0f}`\n"
+                    msg += f"Değer: `${curr['value']:,.2f}`"
                     await send_telegram_message(msg)
             
-            # 2. 1000$ Üstü Alım/Satım (Miktar değişimi üzerinden değer kontrolü)
+            # 2. 1000$ Üstü Alım/Satım
             for curr in portfolio:
                 prev = next((p for p in prev_data['portfolio'] if p['mint'] == curr['mint']), None)
                 if prev:
@@ -165,26 +198,26 @@ async def check_wallets():
                     diff_value = abs(diff_amount * curr['price'])
                     if diff_value > 1000:
                         action = "ALIM" if diff_amount > 0 else "SATIM"
-                        msg = f"🔔 *BÜYÜK İŞLEM TESPİT EDİLDİ ({action})*\nCüzdan: `{wallet}`\nToken: {curr['symbol']}\nDeğişim Değeri: ${diff_value:,.2f}"
+                        msg = f"🔔 *BÜYÜK İŞLEM ({action})*\n"
+                        msg += f"Cüzdan: `{wallet}`\n"
+                        msg += f"Token: [{curr['name']}]({curr['url']})\n"
+                        msg += f"Değişim Değeri: `${diff_value:,.2f}`"
                         await send_telegram_message(msg)
         
-        # Durumu güncelle
+        # Güncelle
         previous_portfolios[wallet] = {
             'total_value': total_value,
-            'sol_balance': sol_balance,
             'portfolio': portfolio
         }
 
 async def main():
-    # İlk çalıştırmada mevcut durumu kaydet
-    await check_wallets()
+    print("Bot başlatılıyor...")
+    await check_wallets() # İlk kontrol
     
-    # Zamanlayıcıyı başlat (30 dakikada bir)
     scheduler = AsyncIOScheduler()
     scheduler.add_job(check_wallets, 'interval', minutes=30)
     scheduler.start()
     
-    print("Bot çalışıyor... Çıkmak için Ctrl+C")
     try:
         while True:
             await asyncio.sleep(1)
